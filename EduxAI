@@ -1,0 +1,234 @@
+import json
+import os
+import re
+import random
+from datetime import datetime
+# FastAPI e OpenAI
+try:
+    from fastapi import FastAPI
+    from pydantic import BaseModel
+    import openai
+except ImportError:
+    print("Instale fastapi, uvicorn e openai via pip antes de rodar este script.")
+    exit()
+
+# ======================
+# CONFIGURAÇÃO
+# ======================
+PERSONALITY = "reflexiva"
+MEMORY_FILE = "memory.json"
+BOT_NAME = "EduxAI"
+OPENAI_API_KEY = "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"
+
+openai.api_key = OPENAI_API_KEY
+
+# ======================
+# MEMÓRIA
+# ======================
+def load_memory():
+    if os.path.exists(MEMORY_FILE):
+        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {
+        "user_name": None,
+        "history": [],
+        "last_topic": None,
+        "used_facts": [],
+        "learned_facts": [],
+        "asked_questions": []
+    }
+
+def save_memory(mem):
+    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(mem, f, ensure_ascii=False, indent=2)
+
+memory = load_memory()
+
+# ======================
+# NORMALIZAÇÃO LINGUAGEM DIGITAL
+# ======================
+DIGITAL = {
+    "vc": "você", "pq": "por que", "oq": "o que",
+    "q": "que", "tb": "também", "ta": "está", "tá": "está",
+    "n": "não", "nn": "não", "kd": "cadê", "flw": "falou"
+}
+
+def normalize(text):
+    text = text.lower()
+    for k, v in DIGITAL.items():
+        text = re.sub(r"\b"+re.escape(k)+r"\b", v, text)
+    return re.sub(r"\s+", " ", text).strip()
+
+# ======================
+# BASE DE CONHECIMENTO
+# ======================
+KNOWLEDGE = {
+    "brasil": [
+        "O Brasil é um país continental, com enorme diversidade cultural e natural.",
+        "A formação do Brasil mistura povos indígenas, africanos e europeus.",
+        "O futebol no Brasil é identidade cultural, não só esporte.",
+        "O Brasil tem o maior bioma tropical do mundo: a Amazônia."
+    ],
+    "vida": [
+        "A vida é feita de fases; nenhuma é permanente.",
+        "Errar faz parte do crescimento.",
+        "O tempo ensina mais que qualquer escola."
+    ],
+    "inteligência artificial": [
+        "IA simula decisões humanas por padrões e regras.",
+        "Você está construindo uma IA agora.",
+        "IA offline pode aprender apenas por regras e memória local."
+    ]
+}
+
+FACTS = [
+    "O cérebro decide emocionalmente antes de racionalizar.",
+    "A memória muda toda vez que é lembrada.",
+    "O silêncio absoluto não existe.",
+    "Pensar consome energia física.",
+    "O Brasil concentra cerca de 20% da biodiversidade do planeta.",
+    "O corpo humano tem mais de 600 músculos.",
+    "As formigas não têm pulmões, respiram pela pele.",
+    "O som viaja mais rápido na água do que no ar.",
+    "Os golfinhos têm nomes próprios entre eles.",
+    "O chocolate era usado como moeda pelos maias."
+]
+
+# ======================
+# UTILIDADES
+# ======================
+def new_fact():
+    available = [f for f in FACTS + memory["learned_facts"] if f not in memory["used_facts"]]
+    if not available:
+        memory["used_facts"] = []
+        available = FACTS + memory["learned_facts"]
+    fact = random.choice(available)
+    memory["used_facts"].append(fact)
+    save_memory(memory)
+    return fact
+
+def persona_wrap(text):
+    if PERSONALITY == "sarcástica":
+        return text + " 😈"
+    if PERSONALITY == "reflexiva":
+        return text
+    return text
+
+def learn_new_fact(fact):
+    fact = fact.strip()
+    if fact and fact not in FACTS and fact not in memory["learned_facts"]:
+        memory["learned_facts"].append(fact)
+        save_memory(memory)
+        return True
+    return False
+
+def ask_openai(prompt):
+    try:
+        response = openai.Completion.create(
+            engine="text-davinci-003",
+            prompt=prompt,
+            max_tokens=150,
+            temperature=0.7
+        )
+        return response.choices[0].text.strip()
+    except Exception as e:
+        return f"Erro ao acessar API externa: {str(e)}"
+
+# ======================
+# INTENÇÃO
+# ======================
+def detect_intent(text):
+    rules = [
+        ("learn_user_name", r"meu nome é\s*(.+)"),
+        ("recall_user_name", r"qual meu nome"),
+        ("recall_bot_name", r"qual seu nome|quem é você|quem você é|como você se chama"),
+        ("greeting", r"\b(oi|olá|opa|fala|salve|e aí)\b"),
+        ("fact_request", r"algo interessante|me conte|curiosidade|fato"),
+        ("another_fact", r"\boutra\b"),
+        ("topic", r"o que você sabe|fala sobre"),
+        ("deepen", r"me explica|fala mais"),
+        ("bot_state", r"como você está|como vc está|tudo bem|como vai|como se sente"),
+        ("learn_fact", r"lembre que (.+)"),
+        ("ask_online", r".*")
+    ]
+    for intent, pattern in rules:
+        if re.search(pattern, text):
+            return intent
+    return "free"
+
+# ======================
+# RACIOCÍNIO
+# ======================
+def reason(text):
+    intent = detect_intent(text)
+    memory["last_intent"] = intent
+
+    if intent == "learn_user_name":
+        match = re.search(r"meu nome é\s*(.+)", text)
+        if match:
+            name = match.group(1).strip().title()
+            memory["user_name"] = name
+            save_memory(memory)
+            return f"Certo. Vou lembrar que seu nome é {name}."
+
+    if intent == "recall_user_name":
+        return f"Seu nome é {memory['user_name']}." if memory["user_name"] else "Você ainda não me disse seu nome."
+
+    if intent == "recall_bot_name":
+        return f"Eu sou {BOT_NAME}, sua assistente online inteligente."
+
+    if intent == "greeting":
+        return f"Oi, {memory['user_name']}!" if memory["user_name"] else "Oi!"
+
+    if intent in ["fact_request", "another_fact"]:
+        return new_fact()
+
+    if intent == "learn_fact":
+        match = re.search(r"lembre que (.+)", text)
+        if match and learn_new_fact(match.group(1)):
+            return "Entendido, memorizei isso!"
+        return "Já sabia disso ou não entendi direito."
+
+    if intent == "topic":
+        for topic in KNOWLEDGE:
+            if topic in text:
+                memory["last_topic"] = topic
+                save_memory(memory)
+                return random.choice(KNOWLEDGE[topic])
+        return "Sobre qual assunto você quer saber?"
+
+    if intent == "deepen":
+        if memory["last_topic"] and memory["last_topic"] in KNOWLEDGE:
+            return random.choice(KNOWLEDGE[memory["last_topic"]])
+        return "Aprofundar em qual assunto?"
+
+    if intent == "bot_state":
+        return "Estou bem, e você?"
+
+    if intent == "ask_online":
+        return ask_openai(text)
+
+    return "Entendi. Continua."
+
+# ======================
+# FASTAPI
+# ======================
+app = FastAPI()
+
+class UserMessage(BaseModel):
+    message: str
+
+@app.post("/chat")
+async def chat_endpoint(data: UserMessage):
+    text = normalize(data.message)
+    memory["history"].append({
+        "time": datetime.now().isoformat(timespec="seconds"),
+        "text": text
+    })
+    save_memory(memory)
+    response = reason(text)
+    return {"response": persona_wrap(response)}
+
+@app.get("/")
+async def root():
+    return {"message": f"{BOT_NAME} ONLINE. Use /chat endpoint para conversar."}
